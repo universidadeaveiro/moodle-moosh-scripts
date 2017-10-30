@@ -1,0 +1,195 @@
+#!/bin/bash
+#===============================================================================
+# HEADER (this header was shamelessly stolen from Michel VONGILAY @ uxora.com)
+#===============================================================================
+#% SYNOPSIS
+#+   ${SCRIPT_NAME} [-hv] [-l FILE] -i FILE -m DIR
+#%
+#% DESCRIPTION
+#%   This script tries to mimic the existing funcionality of Upload
+#%   Courses by file. A funcionality present on the Moodle web interface making
+#%   it available, with the help of Moosh (https://github.com/tmuras/moosh),
+#%   in a bash console.
+#%   The script obtains a list of courses from a specified file or URL,
+#%   compares it with the courses that currently exist in the moodle instance,
+#%   and does the following actions, according to necessity:
+#%     - creates new courses;
+#%     - modifies the name of an existing course.
+#%
+#% OPTIONS
+#%   -m DIR                      Set the path where moodle is installed. 
+#%   -i FILE                     Set CSV input file. Can also be a URL, in which
+#%                               case it will be downloaded into a temporary
+#%                               file.
+#%   -l FILE                     Set log file. By default, it outputs to stdout.
+#%   -h                          Print this help
+#%   -v                          Print version information
+#%
+#===============================================================================
+#- IMPLEMENTATION
+#-   version               ${SCRIPT_NAME} 1.0.0
+#-   author                Área Plataformas Abertas (jpgrego@ua.pt,
+#-                                                    pedro.lobo@ua.pt)
+#-   organization          Universidade de Aveiro
+#===============================================================================
+#  HISTORY
+#    2017/07/27 : jpgrego: Script creation
+#===============================================================================
+# END_OF_HEADER
+#===============================================================================
+
+# exit on error
+set -o errexit
+
+# exit on using unset variables
+set -o nounset
+
+source ./utils
+readonly CATEGORIES_FROM_MOODLE_FILENAME=$(mktemp)
+readonly COURSES_FROM_MOODLE_FILENAME=$(mktemp)
+
+i_set=0
+m_set=0
+trap 'rm -f ${COURSES_FROM_MOODLE_FILENAME} ${CATEGORIES_FROM_MOODLE_FILENAME}; exit' INT TERM EXIT
+
+while getopts 'hvl:i:m:' opt; do
+    case "${opt}" in
+        h)
+            utils::usagefull
+            exit 0
+            ;;
+        v)
+            utils::scriptinfo
+            exit 0
+            ;;
+        l)
+            abs_path=$(readlink -f "${OPTARG}") || true
+            
+            if [[ -z "${abs_path}" ]]; then
+                echo "The provided path for the log file doesn't exist." >&2
+                exit 1
+            fi
+
+            readonly LOGS_FILE="${abs_path}"
+            unset abs_path
+            ;;
+        i)
+            if [[ "${OPTARG}" =~ ${URL_REGEX} ]]; then
+                readonly INPUT_COURSES_LIST_FILENAME=$(mktemp)
+                trap 'rm -f ${COURSES_FROM_MOODLE_FILENAME} ${CATEGORIES_FROM_MOODLE_FILENAME} ${INPUT_COURSES_LIST_FILENAME}; exit' INT TERM EXIT
+                curl -s -o "${INPUT_COURSES_LIST_FILENAME}" "${OPTARG}"
+            else                
+                abs_path=$(readlink -f "${OPTARG}") || true
+
+                if [[ ! -f "${abs_path}" ]]; then
+                    echo "The provided CSV input file containing the" \
+                         "categories doesn't seem to exist or it's not a" \
+                         "file." >&2
+                    exit 1
+                fi
+
+                readonly INPUT_COURSES_LIST_FILENAME="${abs_path}"
+            fi
+            i_set=1
+            ;;
+        m)
+            abs_path=$(readlink -f "${OPTARG}") || true
+            
+            if [[ ! -d "${abs_path}" ]]; then
+                echo "The provided moodle path doesn't seem to exist or it's" \
+                     "not a folder." >&2
+                exit 1
+            fi
+
+            readonly MOOSH_CMD_PREFIX="${MOOSH_BIN} -n -p ${OPTARG}"
+            m_set=1
+            ;;
+    esac
+done
+
+{
+
+[[ "${i_set}" -eq 0 ]] && echo "Input CSV file not set. Please use -i" \
+                               "option to set it." >&2
+[[ "${m_set}" -eq 0 ]] && echo "Moodle path is not set. Please use -m" \
+                               "option to set it." >&2
+[[ "${i_set}" -eq 0 || "${m_set}" -eq 0 ]] && (utils::usage; exit 1)
+utils::generic_initial_verification || exit 1
+utils::write_to_log "Initiating moosh courses script..."
+
+${MOOSH_CMD_PREFIX} course-list > "${COURSES_FROM_MOODLE_FILENAME}"
+${MOOSH_CMD_PREFIX} category-list > "${CATEGORIES_FROM_MOODLE_FILENAME}"
+
+i=1
+while IFS='' read -r line <&9; do
+
+    # skip first line
+    [[ ${i} -eq 1 ]] && ((i=i+1)) && continue
+
+    # skip line if empty
+    [[ -z "${line}" ]] && continue
+    
+    # data - course information, provided line by line from the CSV file
+    # data[0] = fullname
+    # data[1] = shortname
+    # data[2] = category
+    # data[3] = idnumber
+    # data[4] = summary
+    IFS=$'\n'
+    data=($(echo "${line}" | awk -F';' '{ gsub(/;\s+/, ";"); gsub(/\s+;/, ";"); gsub(/^\s+|\s+$/, ""); print $1; print $2; print $3; print $4; print $5}'))
+    unset IFS
+
+    # proceed only if ${data[1] is not empty
+    # in case ${data[1]} is not set, set it as empty (that's what ${data[1]:-}
+    # is for)
+    [[ -z "${data[1]:-}" ]] && continue
+
+    # does course with the specified shortname exist
+    escaped_course_name=$(utils::escape_special_chars "${data[1]}")
+    does_course_exist_query=$(grep -Pi "\"\s*${escaped_course_name}\s*\"" "${COURSES_FROM_MOODLE_FILENAME}" || true)
+    # if [[ -n "${does_course_exist_query}" ]]; then
+    #     moodle_course_fullname=$(echo "${does_course_exist_query}" | awk -F'"' '{print $8}')
+
+    #     # if fullnames aren't the same, update the moodle course fullname
+    #     if [[ "${data[0]}" != "${moodle_course_fullname}" ]]; then
+    #         moodle_course_id=$(echo "${does_course_exist_query}" | awk -F',' '{gsub(/\"/, ""); print $1}')
+    #         result=$(${MOOSH_CMD_PREFIX} course-config-set course "${moodle_course_id}" fullname "${data[0]}" || true)
+            
+    #         if [[ $(echo "${result}" | awk '{print $1}') == "OK" ]]; then
+    #             utils::write_to_log "Modified fullname of course ${moodle_course_id} from \"${moodle_course_fullname}\" to \"${data[0]}\""
+    #         else
+    #             utils::write_to_log "ERROR: Failed modifying fullname of course ${moodle_course_id}"
+    #         fi
+    #     fi
+    # else
+    if [[ -z "${does_course_exist_query}" ]]; then
+        # CATEGORY
+        # [0]: CTESP
+        # [1]: 2112 - Gestão de Processos Industriais
+        IFS=$'\n'
+        category=($(echo "${data[2]}" | awk -F'\\s*/\\s*' '{ print $1; print $2 }'))
+        unset IFS
+
+        escaped_category_name=$(utils::escape_special_chars "${category[1]}")
+        category_id=$(awk "/(${escaped_category_name}).*(Top\/${category[0]})\s*$/ { print \$1 }" "${CATEGORIES_FROM_MOODLE_FILENAME}")
+
+        # if these variables aren't a number, skip
+        if [[ ! "${category_id}" =~ ^[0-9]+$ ]]; then
+            utils::write_to_log "ERROR: Wanted to create a course under \"${data[2]}\" but this category wasn't found on the category list"
+            continue
+        fi
+
+        created_course_id=$(${MOOSH_CMD_PREFIX} course-create -c "${category_id}" -f "${data[0]}" -i "${data[1]}" "${data[1]}" 2>&1 || true)
+
+        if grep -qoi "error" <<< "${created_course_id}"; then
+            utils::write_to_log "ERROR: Failed creating course \"${data[1]}\" under category \"${data[2]}\" (${category_id})"
+        else
+            utils::write_to_log "Created new course \"${data[1]}\" (${created_course_id}) under category \"${data[2]}\" (${category_id}) with fullname \"${data[0]}\""
+        fi
+    fi
+
+done 9< "${INPUT_COURSES_LIST_FILENAME}"
+
+utils::write_to_log "Moosh courses script has finished!"
+
+}

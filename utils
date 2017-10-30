@@ -1,0 +1,189 @@
+#!/bin/bash
+#===============================================================================
+# HEADER (this header was shamelessly stolen from Michel VONGILAY @ uxora.com)
+#===============================================================================
+#% DESCRIPTION
+#%   Collection of functions and variables that are useful to other moosh
+#%   scripts. This script is not intended to be used as a standalone script.
+#===============================================================================
+#- IMPLEMENTATION
+#-   version               ${SCRIPT_NAME} 1.0.0
+#-   author                Área Plataformas Abertas  (jpgrego@ua.pt,
+#-                                                    pedro.lobo@ua.pt)
+#-   organization          Universidade de Aveiro
+#===============================================================================
+#  HISTORY
+#    2017/08/02 : jpgrego: Script creation
+#===============================================================================
+# END_OF_HEADER
+#===============================================================================
+
+readonly SCRIPT_HEADSIZE=$(awk '/^# END_OF_HEADER/ {print NR}' "$0")
+readonly SCRIPT_NAME=$(basename "$0")
+readonly URL_REGEX='(https?|ftp|file)://[-A-Za-z0-9\+&@#/%?=~_|!:,.;]*[-A-Za-z0-9\+&@#/%=~_|]'
+#readonly MOODLE_PATH='/var/www/html/moodle/webroot/elearning-2017-18'
+#readonly MOODLE_PATH='/var/www/html/moodle/webroot'
+readonly MOOSH_BIN=$(which moosh)
+
+################################################################################
+# Show how to use the script
+#
+# Globals:
+#   SCRIPT_NAME
+# Arguments:
+#   None
+# Returns:
+#   None
+################################################################################
+function utils::usage() {
+    local temp
+    temp=$(awk '/^#\+/ {gsub("^#\\+", ""); print "Usage: "; print $0 }' "$0")
+    temp="${temp//\$\{SCRIPT_NAME\}/${SCRIPT_NAME}}"
+    echo "${temp}"
+}
+
+################################################################################
+# Show full information concerning the script, including how to use, author,
+# description, etc.
+#
+# Globals:
+#   SCRIPT_NAME
+# Arguments:
+#   None
+# Returns:
+#   None
+################################################################################
+function utils::usagefull() {
+    local temp
+    temp=$(awk '/^#[%+-]/ {gsub("^#[%+-]", ""); print }' "$0")
+    temp="${temp//\$\{SCRIPT_NAME\}/${SCRIPT_NAME}}"
+    echo "${temp}"
+}
+
+################################################################################
+# Show author info of the script
+#
+# Globals:
+#   SCRIPT_NAME
+# Arguments:
+#   None
+# Returns:
+#   None
+################################################################################
+function utils::scriptinfo() {
+    local temp
+    temp=$(awk '/^#-/ {gsub("^#-", ""); print }' "$0")
+    temp="${temp//\$\{SCRIPT_NAME\}/${SCRIPT_NAME}}"
+    echo "${temp}"
+}
+
+################################################################################
+# Remove leading and trailing whitespace from a given variable
+#
+# Globals:
+#   None
+# Arguments:
+#   $1 string that is to be trimmed
+# Returns:
+#   trimmed string
+################################################################################
+function utils::trim_string() {
+    local temp
+    temp=$(echo "$1" | sed -e 's/^\s*//' -e 's/\s*$//')
+    echo "${temp}"
+}
+
+################################################################################
+# Escape all special characters on a given string. Useful when the string is to
+# be used in the middle of a regex search.
+#
+# Globals:
+#   None
+# Arguments:
+#   $1 string to be escaped
+# Returns:
+#   escaped string
+################################################################################
+function utils::escape_special_chars() {
+    local temp
+    temp="$1"
+    
+    # escape '\'
+    temp="${temp//\\/\\\\}"
+    # escape '|'
+    temp="${temp//|/\|}"
+    # escape '('
+    temp="${temp//(/\(}"
+    # escape ')'
+    temp="${temp//)/\)}"
+    # escape '$'
+    temp="${temp//\$/\\$}"
+    # escape '^'
+    temp="${temp//^/\^}"
+    # escape '['
+    temp="${temp//[/\[}"
+    # escape ']'
+    temp="${temp//]/\]}"
+    # escape '*'
+    temp="${temp//\*/\*}"
+    # escape '.'
+    temp="${temp//./\.}"
+    # escape '+'
+    temp="${temp//+/\+}"
+    # escape '?'
+    temp="${temp//\?/\?}"
+    # escape '{'
+    temp="${temp//{/\{}"
+    # escape '}'
+    temp="${temp//\}/\}}"
+
+    echo "${temp}"
+}
+################################################################################
+# write text to the file given by the LOGS_FILE environment variable
+#
+# Globals:
+#   LOGS_FILE
+# Arguments:
+#   $1 string to be written to the file
+# Returns:
+#   None
+################################################################################
+function utils::write_to_log() {
+    if [[ -n "${LOGS_FILE:-}" ]]; then
+        echo -e "[ $(date -Ins) ]\t$1" >> "${LOGS_FILE}"
+    else
+        echo -e "[ $(date -Ins) ]\t$1"
+    fi
+}
+################################################################################
+# Make initial verifications, like checking if moosh is in PATH, and if the
+# logs folder exists
+#
+# Globals:
+#   None
+# Arguments:
+#   None
+# Returns:
+#   0 if everything seems OK
+#   1 otherwise
+################################################################################
+function utils::generic_initial_verification() {   
+    if [[ "${EUID}" == 0 ]]; then
+        echo "Please run this script as a user other than root." >&2
+        return 1
+    fi
+
+    if [[ -z "${MOOSH_BIN}" ]]; then
+        echo "No moosh binary was found. Please make sure moosh is installed." >&2
+        return 1
+    fi
+
+    return 0
+}
+
+function main() {
+    if [[ "${SCRIPT_NAME}" == "utils.sh" ]]; then
+        utils::usagefull
+    fi
+}

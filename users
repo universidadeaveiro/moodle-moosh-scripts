@@ -1,0 +1,480 @@
+#!/bin/bash
+#===============================================================================
+# HEADER (this header was shamelessly stolen from Michel VONGILAY @ uxora.com)
+#===============================================================================
+#% SYNOPSIS
+#+   ${SCRIPT_NAME} [-hv] [-l FILE] -i FILE -m DIR
+#%
+#% DESCRIPTION
+#%   This script tries to mimic the existing funcionality of Upload
+#%   Users by file. A funcionality present on the Moodle web interface making
+#%   it available, with the help of Moosh (https://github.com/tmuras/moosh),
+#%   in a bash console.
+#%   The script obtains a list of users that are currently present in
+#%   Moodle, compares it to a CSV file given by the user, and does the following
+#%   actions, according to necessity:
+#%     - creates a new user;
+#%     - enrolls an existing user into a course;
+#%     - unenrolls a user from a course.
+#%
+#% OPTIONS
+#%   -m DIR                      Set the path where moodle is installed. 
+#%   -i FILE                     Set CSV input file. Can also be a URL, in which
+#%                               case it will be downloaded into a temporary
+#%                               file.
+#%   -l FILE                     Set log file. By default, it outputs to stdout.
+#%   -h                          Print this help
+#%   -v                          Print version information
+#%
+#===============================================================================
+#- IMPLEMENTATION
+#-   version               ${SCRIPT_NAME} 1.0.0
+#-   author                Área Plataformas Abertas  (jpgrego@ua.pt,
+#-                                                    pedro.lobo@ua.pt)
+#-   organization          Universidade de Aveiro
+#===============================================================================
+#  HISTORY
+#    2017/07/20 : jpgrego: Script creation
+#===============================================================================
+# END_OF_HEADER
+#===============================================================================
+
+# exit on error
+set -o errexit
+
+# exit on using unset variables
+set -o nounset
+
+source ./utils
+readonly USERS_FROM_MOODLE_FILENAME=$(mktemp)
+readonly COURSES_FROM_MOODLE_FILENAME=$(mktemp)
+
+################################################################################
+# creates a new user
+#
+# Globals:
+#   None
+# Arguments:
+#   $1 line containing all the info pertinent to the user, taken from the CSV
+#      file
+# Returns:
+#   0 if user was created successfully
+#   1 otherwise
+################################################################################
+function create_user {
+
+    local username password firstname lastname email auth lang maildisplay city
+
+    while IFS=',' read -ra data; do
+        username="${data[0],,}"
+        password="${data[1]}"
+        firstname="${data[2]}"
+        lastname="${data[3]}"
+        email="${data[4],,}"
+        auth="${data[5]}"
+        lang="${data[6]}"
+        maildisplay="${data[7]}"
+        city="${data[8]}"
+    done <<< "$1"
+
+    internalID=$(${MOOSH_CMD_PREFIX} user-create -p "${password}" -f "${firstname}" -l "${lastname}" -e "${email}" -a "${auth}" -C "${lang}" -d "${maildisplay}" -c "${city}" "${username}" 2>&1 || true)
+
+    if grep -qoi "error" <<< "${internalID}"; then
+        echo '1'
+        return 1
+    else
+        echo '0'
+        return 0
+    fi
+}
+
+################################################################################
+# enrolls a list of users into an existing course
+#
+# Globals:
+#   None
+# Arguments:
+#   $1 role (1 if student, 2 if editingteacher, 3 if teacher)
+#   $2 course ID
+#   $3 course shortname (e.g.: 48834-AMCR)
+#   $4 0 or 1, 0 if no check for already enrolled users is to be done,
+#      1 otherwise. useful for using this function recursively when the username
+#      list is too big
+#   $5 username list, separated by spaces (e.g.: ans@ua.pt jpg@ua.pt)
+# Returns:
+#   0 if user was enrolled successfully
+#   1 otherwise
+################################################################################
+function enroll_users {
+
+    local role_num shortname username_list enrolled_users to_enroll_list
+    local check_enrolled
+    role_num="$1"
+    id="$2"
+    shortname="$3"
+    check_enrolled="$4"
+    shift
+    shift
+    shift
+    shift
+    username_list=("$@")
+
+    if [[ -z "${username_list[@]}" ]]; then
+        return 0
+    fi
+
+    local role
+    if [[ "${role_num}" -eq 1 ]]; then
+        role="student"
+    elif [[ "${role_num}" -eq 2 ]]; then
+        role="editingteacher"
+    elif [[ "${role_num}" -eq 3 ]]; then
+        role="teacher"
+    else 
+        utils::write_to_log "ERROR: Failed to add users \"${username_list[*]}\" to \"${shortname}\". Role '$1' not recognized."
+        return 1
+    fi
+
+    if [[ "${check_enrolled}" -eq 1 ]]; then 
+        enrolled_users=($(${MOOSH_CMD_PREFIX} user-list --course-role="${role}" --course="${id}" 'deleted=0' | awk '{print $1}' || true))
+
+        if [[ -n "${enrolled_users:-}" ]]; then
+            to_enroll_list=($(comm -23 <(grep -Po '\S+' <<< "${username_list[*]}" | sort | uniq) <(grep -Po '\S+' <<< "${enrolled_users[*]}" | sort | uniq)))
+        else
+            to_enroll_list=("${username_list[@]}")
+        fi
+    else
+        to_enroll_list=("${username_list[@]}")
+    fi
+
+    # moosh doesn't accept more than 255 arguments, and the course shortname
+    # counts as an argument. positional arguments don't seem to count, however
+    if [[ "${#to_enroll_list[@]}" -ge 254 ]]; then
+        enroll_users "${role_num}" "${id}" "${shortname}" 0 "${to_enroll_list[@]:254}"
+        to_enroll_list=("${to_enroll_list[@]:0:254}")
+    fi
+
+    # attempt to enroll all users, even if one gives an error
+    # moosh will fail adding all users of the list if a single user doesn't
+    # exist
+    # if an error occurs, 
+    while [[ -n "${to_enroll_list[@]:-}" ]]; do
+        retval=$(${MOOSH_CMD_PREFIX} course-enrol -s -r "${role}" "${shortname}" "${to_enroll_list[@]}" 2>&1 || true)
+
+        if [[ -n "${retval}" ]]; then
+            local erruser errmsg
+            erruser=$(grep -Po '[a-z0-9.]+@ua\.pt' <<< "${retval}")
+            errmsg=$(grep '!!!' <<< "${retval}" | awk -F'!!!\\s+|\\s+!!!' '{print $2}')
+            utils::write_to_log "ERROR: Failed to add user \"${erruser}\" to \"${shortname}\". ${errmsg}."
+            to_enroll_list=("${to_enroll_list[@]/${erruser}}")
+
+            local new_list at_least_one_found
+            at_least_one_found=0
+            unset new_list
+            for i in "${!to_enroll_list[@]}"; do
+                if [[ -n "${to_enroll_list[i]}" ]]; then
+                    at_least_one_found=1
+                    new_list+=("${to_enroll_list[i]}")
+                fi
+            done
+
+            if [[ "${at_least_one_found}" -eq 0 ]]; then
+                continue
+            fi
+            
+            to_enroll_list=("${new_list[@]}")
+        else
+            utils::write_to_log "Added users \"${to_enroll_list[*]}\" to \"${shortname}\" as \"${role}\"."
+            return 0
+        fi
+    done
+
+    return 1
+}
+
+################################################################################
+# unenrolls a list of users of an existing course
+#
+# Globals:
+#   None
+# Arguments:
+#   $1 course internal ID (moodle)
+#   $2 course shortname
+#   $3 0 or 1, 0 if no check for already enrolled users is to be done,
+#      1 otherwise. useful for using this function recursively when the username
+#      list is too big
+#   $4 username list, separated by spaces (e.g.: ans@ua.pt jpg@ua.pt)
+# Returns:
+#   0 if user was unenrolled successfully
+#   1 otherwise
+################################################################################
+function unenroll_users {
+    local id shortname username_list enrolled_users
+    local to_unenroll_list to_unenroll_ids unenrolled_ids leftover_ids
+    local check_enrolled
+    id="$1"
+    shortname="$2"
+    check_enrolled="$3"
+    shift
+    shift
+    shift
+    username_list=("$@")
+
+    if [[ -z "${username_list[@]:-}" ]]; then
+        return 0
+    fi
+
+    if [[ "${check_enrolled}" -eq 1 ]]; then 
+        enrolled_users=($(${MOOSH_CMD_PREFIX} user-list --course="${id}" 'deleted=0' | awk '{print $1}' || true))
+        
+        if [[ -n "${enrolled_users:-}" ]]; then
+            # only unenroll those that are currently enrolled
+            # this command creates a new list with only the usernames that are
+            # repeated in the list of users to unenroll and the list of users
+            # currently enrolled
+            to_unenroll_list=($(comm -12 <(grep -Po '\S+' <<< "${username_list[*]}" | sort | uniq) <(grep -Po '\S+' <<< "${enrolled_users[*]}" | sort | uniq)))
+        fi
+    else
+        to_unenroll_list=("${username_list[@]}")
+    fi
+
+    if [[ -z "${to_unenroll_list:-}" ]]; then
+        return 0
+    fi
+
+    # moosh doesn't accept more than 255 arguments, and the course shortname
+    # counts as an argument. positional arguments don't seem to count, however
+    if [[ "${#to_unenroll_list[@]}" -ge 254 ]]; then
+        unenroll_users "${id}" "${shortname}" 0 "${to_unenroll_list[@]:254}"
+        to_unenroll_list=("${to_unenroll_list[@]:0:254}")
+    fi
+
+    for username in "${to_unenroll_list[@]}"; do
+        to_unenroll_ids+=($(grep -P "^${username//./\.} " "${USERS_FROM_MOODLE_FILENAME}" | awk '{print $2}' | grep -Po "[0-9]+"))
+    done
+
+    retval=$(${MOOSH_CMD_PREFIX} course-unenrol "${id}" "${to_unenroll_ids[@]}")
+
+    # contrasting with course-enrol, course-unenrol deals well with invalid IDS
+    # so if nothing is returned, no users were unenrolled, which is unexpected
+    # at this stage
+    if [[ -z "${retval}" ]]; then
+        utils::write_to_log "ERROR: Failed unenrolling \"${to_unenroll_list[*]}\" from course \"${shortname}\"."
+        return 1
+    fi
+
+    unenrolled_ids=($(echo "${retval}" | grep -Po "[0-9]+"))
+    leftover_ids=($(comm -23 <(grep -Po '\S+' <<< "${to_unenroll_ids[*]}" | sort | uniq) <(grep -Po '\S+' <<< "${unenrolled_ids[*]}" | sort | uniq)))
+
+    # if leftover_ids is not empty, there was a partial success
+    if [[ -n "${leftover_ids[@]:-}" ]]; then
+        utils::write_to_log "ERROR: Failed unenrolling users with moodle internal ID \"${leftover_ids[*]}\" from course \"${shortname}\"."
+        utils::write_to_log "Unenrolled users with moodle internal ID \"${unenrolled_ids[*]}\" from course \"${shortname}\"."
+    else
+        utils::write_to_log "Unenrolled users \"${to_unenroll_list[*]}\" from course \"${shortname}\"."
+    fi
+
+    return 0
+}
+
+function main() {
+    [[ "${i_set}" -eq 0 ]] && echo "Input CSV file not set. Please use -i" \
+                                   "option to set it." >&2
+    [[ "${m_set}" -eq 0 ]] && echo "Moodle path is not set. Please use -m" \
+                                   "option to set it." >&2
+    [[ "${i_set}" -eq 0 || "${m_set}" -eq 0 ]] && (utils::usage; exit 1)
+    utils::generic_initial_verification || exit 1
+    utils::write_to_log "Initiating moosh users script..."
+
+    ${MOOSH_CMD_PREFIX} user-list "deleted=0" > "${USERS_FROM_MOODLE_FILENAME}"
+    ${MOOSH_CMD_PREFIX} course-list > "${COURSES_FROM_MOODLE_FILENAME}"
+
+    # read list of users coming from the given list, and add them to moodle if
+    # they don't exist
+    local i
+    i=1
+    while IFS='' read -r line <&9; do
+
+        # skip first line
+        [[ "${i}" -eq 1 ]] && ((i=i+1)) && continue
+
+        # skip line if empty
+        [[ -z "${line}" ]] && continue
+
+        local username
+        username=$(awk -F'\\s*,\\s*' '{print $1}' <<< "${line}")
+        username="${username,,}"
+
+        # query the user DB using the username
+        does_user_exist_query=$(grep -Pi "^${username//./\.} " "${USERS_FROM_MOODLE_FILENAME}" || true)
+
+        if [[ -z "${does_user_exist_query}" ]]; then            
+            local retval
+            retval=$(create_user "${line}" || true)
+            if [[ "${retval}" -eq 1 ]]; then
+                utils::write_to_log "ERROR: An error has occurred while creating \"${username}\""
+            else
+                utils::write_to_log "\"${username}\" has been created."
+            fi
+        fi
+
+    done 9< "${INPUT_USER_LIST_FILENAME}"
+
+    # enroll / unenroll users
+    i=1
+    while IFS='' read -r line <&9 || [[ -n "${line}" ]]; do
+        
+        # skip first line
+        [[ ${i} -eq 1 ]] && ((i=i+1)) && continue
+
+        # skip line if empty
+        [[ -z "${line}" ]] && continue
+
+        local id shortname
+        
+        id=$(awk -F'"' '{print $2}' <<< "${line}")
+        shortname=$(awk -F'","' '{print $3}' <<< "${line}")
+        id=$(utils::trim_string "${id}")
+        shortname=$(utils::trim_string "${shortname}")
+
+        #DEBUG!
+        # if [[ ! "${shortname}" = "42728_ag4" ]]; then
+        #     continue
+        # fi
+
+        # obtain list of users to be enrolled
+        local to_enroll_list to_unenroll_list
+        to_enroll_list=$(grep -i ",${shortname}," "${INPUT_USER_LIST_FILENAME}" || true)
+        to_unenroll_list=$(grep -i ",\*${shortname}," "${INPUT_USER_LIST_FILENAME}" || true)
+
+        #DEBUG!
+        # echo "to_enroll_list: ${to_enroll_list[@]:-}"
+
+        # process enroll list, if existing
+        local username role editingteacher_list teacher_list student_list
+        local escaped_shortname
+        if [[ -n "${to_enroll_list[@]:-}" ]]; then
+            unset editingteacher_list
+            unset teacher_list
+            unset student_list
+            #escaped_shortname=$(utils::escape_special_chars "${shortname}")
+            escaped_shortname=$(utils::escape_special_chars "${shortname,,}")
+            while IFS='' read -ra temp <&8 ; do
+                username=$(awk -F',' 'gsub(/^\s+|\s+$/, ""); {print $1}' <<< "${temp}")
+                role=$(grep -Poi ",${escaped_shortname},[0-9]*,[0-9]+" <<< "${temp}" | uniq | awk -F',' '{print $4}')
+
+                # DEBUG!
+                # echo "temp: ${temp}"
+                # echo "username: ${username}"
+                # echo "role: ${role}"
+
+                if [[ "${role}" -eq "1" ]]; then
+                    # echo "added to student"
+                    student_list+=("${username,,}")
+                elif [[ "${role}" -eq "2" ]]; then
+                    # echo "added to editingteacher"
+                    editingteacher_list+=("${username,,}")
+                elif [[ "${role}" -eq "3" ]]; then
+                    # echo "added to teacher"
+                    teacher_list+=("${username,,}")
+                fi
+
+                # DEBUG!
+                # read
+
+            done 8<<< "${to_enroll_list}"
+
+            # DEBUG!
+            # echo "id: ${id}"
+            # echo "shortname: ${shortname}"
+            # echo ""
+            # echo "to_enroll_list: ${to_enroll_list}"
+            # echo "to_unenroll_list: ${to_unenroll_list}"
+            # echo ""
+            # echo "student_list : ${student_list[@]:-}"
+            # echo "editingteacher_list: ${editingteacher_list[@]:-}"
+            # echo "teacher_list: ${teacher_list[@]:-}"
+            # read
+
+            enroll_users "1" "${id}" "${shortname}" 1 "${student_list[@]:-}" || true
+            enroll_users "2" "${id}" "${shortname}" 1 "${editingteacher_list[@]:-}" || true
+            enroll_users "3" "${id}" "${shortname}" 1 "${teacher_list[@]:-}" || true
+        fi
+
+        # process unenroll list, if existing
+        local user_list
+        if [[ -n "${to_unenroll_list[@]:-}" ]]; then
+            unset user_list
+            while IFS='' read -ra temp <&8; do
+                user_list+=($(awk -F',' '{print $1}' <<< "${temp}"))
+            done 8<<< "${to_unenroll_list}"
+
+            unenroll_users "${id}" "${shortname}" 1 "${user_list[@]:-}" || true
+        fi
+
+    done 9< "${COURSES_FROM_MOODLE_FILENAME}"
+
+    utils::write_to_log "Moosh users script has finished!"
+}
+
+m_set=0
+i_set=0
+trap 'rm -f ${USERS_FROM_MOODLE_FILENAME} ${COURSES_FROM_MOODLE_FILENAME}; exit' INT TERM EXIT
+
+while getopts 'hvl:i:m:' opt; do
+    case "${opt}" in
+        h)
+            utils::usagefull
+            exit 0
+            ;;
+        v)
+            utils::scriptinfo
+            exit 0
+            ;;
+        l)
+            abs_path=$(readlink -f "${OPTARG}") || true
+            
+            if [[ -z "${abs_path}" ]]; then
+                echo "The provided path for the log file doesn't exist." >&2
+                exit 1
+            fi
+
+            readonly LOGS_FILE="${abs_path}"
+            unset abs_path
+            ;;
+        i)
+            if [[ "${OPTARG}" =~ ${URL_REGEX} ]]; then
+                readonly INPUT_USER_LIST_FILENAME=$(mktemp)
+                trap 'rm -f ${USERS_FROM_MOODLE_FILENAME} ${COURSES_FROM_MOODLE_FILENAME} ${INPUT_USER_LIST_FILENAME}; exit' INT TERM EXIT
+                curl -s -o "${INPUT_USER_LIST_FILENAME}" "${OPTARG}"
+            else                
+                abs_path=$(readlink -f "${OPTARG}") || true
+
+                if [[ ! -f "${abs_path}" ]]; then
+                    echo "The provided CSV input file containing the" \
+                         "categories doesn't seem to exist or it's not a" \
+                         "file." >&2
+                    exit 1
+                fi
+
+                readonly INPUT_USER_LIST_FILENAME="${abs_path}"
+            fi
+            i_set=1
+            ;;
+        m)
+            abs_path=$(readlink -f "${OPTARG}") || true
+            
+            if [[ ! -d "${abs_path}" ]]; then
+                echo "The provided moodle path doesn't seem to exist or it's" \
+                     "not a folder." >&2
+                exit 1
+            fi
+
+            readonly MOODLE_PATH="${abs_path}"
+            readonly MOOSH_CMD_PREFIX="${MOOSH_BIN} -n -p ${OPTARG}"
+            m_set=1
+            ;;
+    esac
+done
+
+main "$@"

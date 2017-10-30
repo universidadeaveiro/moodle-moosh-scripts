@@ -1,0 +1,335 @@
+#!/bin/bash
+#===============================================================================
+# HEADER (this header was shamelessly stolen from Michel VONGILAY @ uxora.com)
+#===============================================================================
+#% SYNOPSIS
+#+   ${SCRIPT_NAME} [-hv] [-l FILE] -i FILE -m DIR
+#%
+#% DESCRIPTION
+#%   This script tries to mimic the existing funcionality of Upload
+#%   Categories by file. A funcionality developed by Piers Harding
+#%   (https://github.com/piersharding/moodle-tool_uploadcoursecategory)
+#%   present on the Moodle web interface by installing his plugin and making it
+#%   available, with the help of Moosh (https://github.com/tmuras/moosh),
+#%   in a bash console.
+#%   
+#%   The script obtains a list of categories that are currently present in 
+#%   Moodle, compares it to a CSV file given by the user, and does the following
+#%   actions, according to necessity:
+#%     - moves category to another parent category;
+#%     - modifies category name;
+#%     - creates new category.
+#%
+#% OPTIONS
+#%   -m DIR                      Set the path where moodle is installed. 
+#%   -i FILE                     Set CSV input file. Can also be a URL, in which
+#%                               case it will be downloaded into a temporary
+#%                               file.
+#%   -l FILE                     Set log file. By default, it outputs to stdout.
+#%   -h                          Print this help
+#%   -v                          Print version information
+#%
+#===============================================================================
+#- IMPLEMENTATION
+#-   version               ${SCRIPT_NAME} 1.0.0
+#-   author                Área Plataformas Abertas  (jpgrego@ua.pt,
+#-                                                    pedro.lobo@ua.pt)
+#-   organization          Universidade de Aveiro
+#===============================================================================
+#  HISTORY
+#    2017/07/20 : jpgrego: Script creation
+#===============================================================================
+# END_OF_HEADER
+#===============================================================================
+
+# exit on error
+set -o errexit
+
+# exit on using unset variables
+set -o nounset
+
+source ./utils
+readonly CATEGORIES_FROM_MOODLE_FILENAME=$(mktemp)
+
+################################################################################
+# verifies if a category + parent combo exists
+#
+# Globals:
+#   paco_category_data   array containing information about the category,
+#                        as provided in the CSV file
+#                        (e.g.: [0]: 2º Ciclo, [1]: 9268 - Gestão comercial)
+#
+#   top_category_id      moodle ID of the top category, if it exists (e.g.: 3)
+#   top_category_name    name of the top category, if it exists
+#
+# Arguments:
+#   $1 name of the category + parent combo, as provided from the CSV file
+#      (e.g.: 2º Ciclo / 9268 - Gestão Comercial)
+#
+# Returns:
+#   None
+################################################################################
+function does_category_parent_combo_exist {
+    # if entry of existing_top_categories is "3     2º Ciclo      Top", this
+    # array will have:
+    #   [0] - 3
+    #   [1] - 2º Ciclo
+    local existing_top_categories_details
+    
+    top_category_id=""
+    top_category_name=""
+
+    IFS=$'\n'
+    paco_category_data=($(echo "$1" | awk -F'\\s*/\\s*' '{print $1; print $2}'))
+    unset IFS
+    
+    for top in "${existing_top_categories[@]}"; do
+        IFS=$'\n'
+        existing_top_categories_details=($(echo "${top}" | awk -F'\\s{4,}' '{print $1; print $2}'))
+        unset IFS
+        
+        if [[ "${paco_category_data[0]}" == "${existing_top_categories_details[1]}" ]]; then
+            top_category_id=${existing_top_categories_details[0]}
+            top_category_name=${existing_top_categories_details[1]}
+            break
+        fi
+    done
+}
+
+################################################################################
+# creates a new category
+#
+# Globals:
+#   top_category_id        ID of the created top category. This variable is
+#                          defined in this function if a new top category has
+#                          been created
+#   top_category_name      Name of the created top category. This variable is
+#                          defined in this function if a new top category has
+#                          been created
+# Arguments:
+#   $1 name of the category
+#   $2 (optional) ID of the parent category
+#   $3 (optional) name of the parent category
+# Returns:
+#   None
+################################################################################
+function create_category {
+    if [[ -z "${2:-}" ]]; then
+        top_category_id=$(${MOOSH_CMD_PREFIX} category-create "$1")
+        top_category_name="$1"
+        utils::write_to_log "Created new top category \"$1\", with internal ID \"${top_category_id}\""
+        existing_top_categories+=("${top_category_id}     $1     Top")
+    else
+        local category_id internal_id
+        category_id=$(echo "${paco_category_data[1]}" | awk -F'[ \t]*-[ \t]*' '{print $1}')
+        internal_id=$(${MOOSH_CMD_PREFIX} category-create -p "$2" -i "${category_id}" "$1")
+
+        if [[ -n "${3:-}" ]]; then
+            utils::write_to_log "Created new category \"$1\", under \"$3\" ($2), with internal ID \"${internal_id}\""
+        fi
+    fi
+}
+
+################################################################################
+# modifies the name of a category. please notice that the description is set
+# according to the name given in the argument.
+#
+# Globals:
+#   None
+# Arguments:
+#   $1 category ID
+#   $2 new name
+#   $3 internal ID
+#   $4 old name
+# Returns:
+#   None
+################################################################################
+function modify_category_name {
+    if [[ -n "${1:-}" && -n "${2:-}" ]]; then
+        local result description
+        description=$(echo "$2" | awk -F"$1[ \t]*-" '{gsub(/^[ \t]+|[ \t]+$/, "", $2); print $2}')
+        result=$(${MOOSH_CMD_PREFIX} category-config-set "$3" name "$2" | awk '{print $1}' || true)
+
+        if [[ "${result}" = "OK" ]]; then
+            utils::write_to_log "Modified category name from \"$4\" to \"$2\""
+        else
+            utils::write_to_log "ERROR: Failed modifying category name from \"$4\" to \"$2\""
+        fi                  
+        
+        result=$(${MOOSH_CMD_PREFIX} category-config-set "$3" description "${description}" | awk '{print $1}' || true)
+
+        if [[ "${result}" = "OK" ]]; then
+            utils::write_to_log "Modified category \"$2\" description to \"${description}\""
+        else
+            utils::write_to_log "ERROR: Failed modifying category description."
+        fi
+    fi
+}
+
+################################################################################
+# moves category from one parent to another
+#
+# Globals:
+#   None
+# Arguments:
+#   $1 category ID
+#   $2 target parent category ID
+#   $3 (optional) category new parent name
+#   $4 (optional) category name
+# Returns:
+#   None
+################################################################################
+function move_category {
+    if [[ -n "${1:-}" && -n "${2:-}" ]]; then
+        local result
+        result=$(${MOOSH_CMD_PREFIX} category-move "$1" "$2" 2>&1 || true)
+
+        if [[ -n "${result}" ]]; then
+            utils::write_to_log "ERROR: Moving category $1 failed. ${result}."
+        elif [[ -n "${3:-}" && -n "${4:-}" ]]; then
+            utils::write_to_log "Moved category \"$4\" ($1) to \"$3\" ($2)"
+        else
+            utils::write_to_log "Moved category $1 to $2"
+        fi
+    fi
+}
+
+function main() {    
+    [[ "${i_set}" -eq 0 ]] && echo "Input CSV file not set. Please use -i" \
+                                   "option to set it." >&2
+    [[ "${m_set}" -eq 0 ]] && echo "Moodle path is not set. Please use -m" \
+                                   "option to set it." >&2
+    [[ "${i_set}" -eq 0 || "${m_set}" -eq 0 ]] && (utils::usage; exit 1)
+    utils::generic_initial_verification || exit 1
+    utils::write_to_log "Initiating moosh categories script..."
+
+    ${MOOSH_CMD_PREFIX} category-list > "${CATEGORIES_FROM_MOODLE_FILENAME}"
+
+    IFS=$'\n'
+    existing_top_categories=($(awk '/Top[\t ]*$/' "${CATEGORIES_FROM_MOODLE_FILENAME}"))
+    unset IFS
+
+    local i
+    i=1
+    while IFS='' read -r line <&9; do
+
+        # skip first line
+        [[ ${i} -eq 1 ]] && ((i=i+1)) && continue
+
+        # skip line if empty
+        [[ -z "${line}" ]] && continue
+        
+        # data - category information, provided line by line from the CSV file
+        # data[0] = name
+        # data[1] = idnumber
+        # data[2] = description
+        IFS=$'\n'
+        local data
+        data=($(echo "${line}" | awk -F'[ \t]*;[ \t]*' '{print $1; print $2; print $3}'))
+        unset IFS
+        if [[ "${data[1]:-}" =~ [0-9]{4} ]]; then
+
+            # does the parent category already exist?
+            does_category_parent_combo_exist "${data[0]}"
+
+            # if parent category doesn't exist, create it
+            if [[ -z ${top_category_id} ]]; then
+                create_category "${paco_category_data[0]}"
+            fi
+
+            # does the category already exist?
+            local does_category_exist_query
+            does_category_exist_query=$(grep "${data[1]}" "${CATEGORIES_FROM_MOODLE_FILENAME}" || true)
+
+            if [[ $(wc -l <<< "${does_category_exist_query}") -gt 1 ]]; then
+                utils::write_to_log "Skipping ${data[1][0]}. Duplicate entry detected."
+                continue
+            fi
+
+            if [[ -n ${does_category_exist_query} ]]; then
+                local existing_category_id existing_category_name existing_category_parent
+                existing_category_id=$(echo "${does_category_exist_query}" | awk '{print $1}')
+                existing_category_name=$(echo "${does_category_exist_query}" | awk -F"${data[1]}" "{gsub(/[ \t]+$|[\n]+/, \"\", \$2); print \"${data[1]}\" \$2}")
+                existing_category_parent=$(echo "${does_category_exist_query}" | awk -F'Top/' '{gsub(/^[ \t]+|[ \t]+$/, "", $2); print $2}')
+
+                # already existing category has a different parent?
+                if [[ "${paco_category_data[0]}" != "${existing_category_parent}" ]]; then
+                    move_category "${existing_category_id}" "${top_category_id}" "${paco_category_data[0]}" "${existing_category_name}"
+                fi
+                
+                # already existing category has a different name?
+                if [[ "${paco_category_data[1]}" != "${existing_category_name}" ]]; then
+                    modify_category_name "${data[1]}" "${paco_category_data[1]}" "${existing_category_id}" "${existing_category_name}"
+                fi
+            else
+                if [[ -n ${top_category_id} ]]; then
+                    create_category "${paco_category_data[1]}" "${top_category_id}" "${top_category_name}"
+                fi
+            fi
+
+        fi
+    done 9< "${INPUT_CATEGORIES_LIST_FILENAME}"
+
+    utils::write_to_log "Moosh categories script has finished!"
+}
+
+m_set=0
+i_set=0
+trap 'rm -f ${CATEGORIES_FROM_MOODLE_FILENAME}; exit' INT TERM EXIT
+
+while getopts 'hvl:i:m:' opt; do
+    case "${opt}" in
+        h)
+            utils::usagefull
+            exit 0
+            ;;
+        v)
+            utils::scriptinfo
+            exit 0
+            ;;
+        l)
+            abs_path=$(readlink -f "${OPTARG}") || true
+            
+            if [[ -z "${abs_path}" ]]; then
+                echo "The provided path for the log file doesn't exist." >&2
+                exit 1
+            fi
+
+            readonly LOGS_FILE="${abs_path}"
+            unset abs_path
+            ;;
+        i)
+            if [[ "${OPTARG}" =~ ${URL_REGEX} ]]; then
+                readonly INPUT_CATEGORIES_LIST_FILENAME=$(mktemp)
+                trap 'rm -f ${CATEGORIES_FROM_MOODLE_FILENAME} ${INPUT_CATEGORIES_LIST_FILENAME}; exit' INT TERM EXIT
+                curl -s -o "${INPUT_CATEGORIES_LIST_FILENAME}" "${OPTARG}"
+            else                
+                abs_path=$(readlink -f "${OPTARG}") || true
+
+                if [[ ! -f "${abs_path}" ]]; then
+                    echo "The provided CSV input file containing the" \
+                         "categories doesn't seem to exist or it's not a" \
+                         "file." >&2
+                    exit 1
+                fi
+
+                readonly INPUT_CATEGORIES_LIST_FILENAME="${abs_path}"
+            fi
+            i_set=1
+            ;;
+        m)
+            abs_path=$(readlink -f "${OPTARG}") || true
+            
+            if [[ ! -d "${abs_path}" ]]; then
+                echo "The provided moodle path doesn't seem to exist or it's" \
+                     "not a folder." >&2
+                exit 1
+            fi
+
+            readonly MOOSH_CMD_PREFIX="${MOOSH_BIN} -n -p ${OPTARG}"
+            m_set=1
+            ;;
+    esac
+done
+
+main "$@"
