@@ -8,7 +8,7 @@
 #===============================================================================
 #- IMPLEMENTATION
 #-   version               ${SCRIPT_NAME} 1.0.0
-#-   author                Área Plataformas Abertas  (jpgrego@ua.pt,
+#-   author                Grupo Plataformas Abertas (jpgrego@ua.pt,
 #-                                                    pedro.lobo@ua.pt)
 #-   organization          Universidade de Aveiro
 #===============================================================================
@@ -21,6 +21,8 @@
 readonly SCRIPT_HEADSIZE=$(awk '/^# END_OF_HEADER/ {print NR}' "$0")
 readonly SCRIPT_NAME=$(basename "$0")
 readonly URL_REGEX='(https?|ftp|file)://[-A-Za-z0-9\+&@#/%?=~_|!:,.;]*[-A-Za-z0-9\+&@#/%=~_|]'
+#readonly MOODLE_PATH='/var/www/html/moodle/webroot/elearning-2017-18'
+#readonly MOODLE_PATH='/var/www/html/moodle/webroot'
 readonly MOOSH_BIN=$(which moosh)
 
 ################################################################################
