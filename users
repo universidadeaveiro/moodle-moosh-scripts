@@ -119,8 +119,8 @@ function enroll_users {
     shift
     username_list=("$@")
 
-    if [[ -z "${username_list[@]}" ]]; then
-        return 0
+    if [[ -z "${username_list[@]:-}" ]]; then
+	return 0
     fi
 
     local role
