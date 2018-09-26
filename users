@@ -35,7 +35,7 @@
 #===============================================================================
 #  HISTORY
 #    2017/07/20 : jpgrego: Script creation
-#    2018/09/20 : pedro.lobo: Forum DIgest Bug
+#    2018/09/20 : pedro.lobo: Forum Digest Bug
 #===============================================================================
 # END_OF_HEADER
 #===============================================================================
@@ -78,8 +78,8 @@ function create_user {
         city="${data[8]}"
     done <<< "$1"
 
-    #internalID=$(${MOOSH_CMD_PREFIX} user-create -p "${password}" -f "${firstname}" -l "${lastname}" -e "${email}" -a "${auth}" -C "${lang}" -d "${maildisplay}" -c "${city}" "${username}" 2>&1 || true)
-    internalID=$(${MOOSH_CMD_PREFIX} user-create -p "${password}" -f "${firstname}" -l "${lastname}" -e "${email}" -a "${auth}" -C "${lang}" -d 0 -c "${city}" "${username}" 2>&1 || true)
+    internalID=$(${MOOSH_CMD_PREFIX} user-create -p "${password}" -f "${firstname}" -l "${lastname}" -e "${email}" -a "${auth}" -C "${lang}" -d "${maildisplay}" -c "${city}" "${username}" 2>&1 || true)
+    #internalID=$(${MOOSH_CMD_PREFIX} user-create -p "${password}" -f "${firstname}" -l "${lastname}" -e "${email}" -a "${auth}" -C "${lang}" -d 0 -c "${city}" "${username}" 2>&1 || true)
 
     if grep -qoi "error" <<< "${internalID}"; then
         echo '1'
